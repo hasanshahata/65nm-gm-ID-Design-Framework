@@ -15,7 +15,7 @@ clear all; close all; clc;
 load('65nch.mat'); 
 load('65pch.mat'); 
 
-% --- ?????? ?????? ??? PMOS ---
+% --- Take the Absolute for PMOS ---
 fields = fieldnames(pch);
 for k = 1:length(fields)
     if isnumeric(pch.(fields{k}))
