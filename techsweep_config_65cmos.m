@@ -1,7 +1,7 @@
 % =========================================================================
 % Analog IC Design Master Script using gm/ID Methodology
 % Technology: 65nm CMOS
-% Author: Hassan
+% Author: Hassan Shehata
 % Institution: Mansoura University
 % Date: March 2026
 %

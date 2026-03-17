@@ -3,7 +3,7 @@
 clear all; close all;
 
 % Load configuration
-c = techsweep_config_tsmc65;
+c = techsweep_config_65cmos;
 
 % Write sweep info
 nch.INFO   = c.modelinfo;
