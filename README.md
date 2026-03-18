@@ -14,6 +14,7 @@ Based on Prof. Boris Murmann's $g_m/I_D$ starter kit, this fork has been heavily
   * `s` / `d`: Synthesis tools for auto-sizing transistors (calculating $W$, $L$, $I_D$, $C_{gg}$) directly from target specs.
   * `e`: Export feature to save sizing reports to a design log text file.
   * `p`: Custom plot generator for any variable (e.g., $C_{gg}/W$, $V_{th}$).
+  * `i`: Transistor Profiler: Full DC/AC parameter card.
 
 ## 🛠️ How to Use
 1. Clone this repository to your Linux environment with Cadence Virtuoso and MATLAB installed.
