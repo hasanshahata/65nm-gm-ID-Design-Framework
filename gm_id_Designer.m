@@ -240,115 +240,152 @@ function cadence_shortcuts(fig, event)
         % ================================================================
         case 'p'   % Custom plot
             % ----------------------------------------------------------------
-            % Actual raw struct fields (from .mat):
-            %   VGS-swept : VT  ID  IGD  IGS  GM  GMB  GDS  CGG  CGS
-            %               CSG CGD CDG  CGB  CDD CSS
-            % Derived by lookup() from raw fields (GM_ID sweep):
-            %   GM_GDS  GM_CGG  CGG_W  CGD_W  CDD_W  ID_W  GDS_W
-            % Fields that MUST use VGS sweep (not meaningful vs gm/ID):
-            %   VT  ID  GM  GMB  GDS  CGG  CGS  CSG  CGD  CDG  CGB  CDD  CSS
+            % Dialog returns: y_var, x_axis ('GMID' or 'VGS'),
+            %                 cust_L, cust_vds, dlg_ok
+            % The user explicitly chooses both Y field AND X axis.
+            % For VT_GMID / VOV_GMID the composed two-step path is used
+            % regardless of x_axis selection (always plotted vs gm/ID).
             % ----------------------------------------------------------------
-
-            % Raw struct fields that exist in the .mat (VGS-indexed)
-            raw_vgs = {'VT','ID','IGD','IGS','GM','GMB','GDS', ...
-                       'CGG','CGS','CSG','CGD','CDG','CGB','CDD','CSS'};
-            % Derived fields computed by lookup() vs GM_ID
-            raw_gmid = {'GM_GDS','GM_CGG','CGG_W','CGD_W','CDD_W', ...
-                        'ID_W','GDS_W','IGD_W','IGS_W'};
-
-            % Build a clean custom dialog with description panel
-            % using a proper figure instead of inputdlg hint-row hack
-            [y_var, cust_L, cust_vds, dlg_ok] = custom_plot_dialog(CLR);
+            [y_var, x_axis, cust_L, cust_vds, dlg_ok] = custom_plot_dialog(CLR);
             if ~dlg_ok, return; end
 
-            % Auto-detect which axis to use based on field type
-            % Raw struct fields -> VGS sweep; derived fields -> GM_ID sweep
-            use_vgs = any(strcmp(y_var, raw_vgs));
+            % ---- Routing logic ------------------------------------------
+            % raw_vgs_fields: exist in .mat indexed on VGS axis only.
+            % If user picks X=gm/ID for one of these, we automatically
+            % use the two-step composed path (lookupVGS then lookup field).
+            % This is the ONLY valid way to get them vs gm/ID from the LUT.
+            raw_vgs_fields = {'VT','ID','IGD','IGS','GM','GMB','GDS', ...
+                              'CGG','CGS','CSG','CGD','CDG','CGB','CDD','CSS'};
+            norm_fields    = {'ID','GM','GMB','GDS','CGG','CGS','CSG', ...
+                              'CGD','CDG','CGB','CDD','CSS'};
+            composed_names = {'VT_GMID','VOV_GMID'};
 
-            if isempty(cust_L)
-                errordlg('Invalid length format.','Input Error'); return;
+            use_vgs      = strcmp(x_axis,'VGS');
+            use_composed = any(strcmp(y_var, composed_names));
+            % Auto-escalate: raw VGS field + X=gm/ID -> composed path
+            if ~use_vgs && ~use_composed && any(strcmp(y_var, raw_vgs_fields))
+                use_composed = true;
             end
+            if use_composed, use_vgs = false; end
+
             isN    = strcmp(State.current_dev,'nch');
             colors = CLR.nmos_lines; if ~isN, colors=CLR.pmos_lines; end
             leg    = cell(1,numel(cust_L));
 
-            nf = figure('Name',sprintf('Custom: %s  [%s]',y_var,upper(State.current_dev)), ...
+            nf = figure('Name',sprintf('%s vs %s  [%s]', y_var, x_axis, ...
+                        upper(State.current_dev)), ...
                         'Color',CLR.bg,'Position',[160 130 720 480]);
             set(nf,'WindowKeyPressFcn',@(f,e) cadence_shortcuts(f,e));
             setappdata(nf,'State',State);
             ax = axes('Parent',nf); style_axes(ax,CLR); hold(ax,'on');
 
-            if use_vgs
-                % ---- VGS sweep (raw struct fields) -------------------------
-                vgs_vec = linspace(0.0, 1.2, 241);   % 5 mV steps
+            if use_composed
+                % ---- COMPOSED: any raw-VGS field vs gm/ID ------------------
+                % Step 1: gm/ID -> VGS  (lookupVGS, exact LUT inversion)
+                % Step 2: VGS  -> field (lookup on VGS axis, direct LUT read)
+                % Also handles VT_GMID and VOV_GMID named fields.
+                gmid = State.gm_id_range;
+                W_ref = dev_data.W;
+                for k = 1:numel(cust_L)
+                    c = colors{mod(k-1,numel(colors))+1};
+                    try
+                        % Step 1: exact VGS at each gm/ID point
+                        vgs_c = arrayfun(@(gid) lookupVGS(dev_data,'GM_ID',gid, ...
+                            'L',cust_L(k),'VDS',cust_vds,'VSB',0), gmid);
+
+                        if strcmp(y_var,'VOV_GMID')
+                            % VOV = VGS - VT: need VT from LUT
+                            vt_c = arrayfun(@(vg) lookup(dev_data,'VT','VGS',vg, ...
+                                'L',cust_L(k),'VDS',cust_vds), vgs_c);
+                            yd = vgs_c - vt_c;
+                        elseif strcmp(y_var,'VT_GMID')
+                            % VT directly from LUT at the VGS points
+                            yd = arrayfun(@(vg) lookup(dev_data,'VT','VGS',vg, ...
+                                'L',cust_L(k),'VDS',cust_vds), vgs_c);
+                        else
+                            % Any other raw VGS field (VT, ID, GM, GDS, CGG ...)
+                            yd = arrayfun(@(vg) lookup(dev_data,y_var,'VGS',vg, ...
+                                'L',cust_L(k),'VDS',cust_vds), vgs_c);
+                            % Normalize per-width for current/capacitance fields
+                            if any(strcmp(y_var, norm_fields))
+                                yd = yd / W_ref;
+                            end
+                        end
+
+                        plot(ax, gmid, yd,'Color',c,'LineWidth',2.2,'Tag','data_curve');
+                        leg{k} = sprintf('L = %g um', cust_L(k));
+                    catch ME
+                        errordlg([sprintf('Lookup failed: %s at L=%g.',y_var,cust_L(k)) ...
+                                  char(10) ME.message],'Plot Error');
+                        close(nf); return;
+                    end
+                end
+                xlabel(ax,'g_m/I_D  (1/V)','Color',CLR.ax_fg,'FontSize',11);
+
+            elseif use_vgs
+                % ---- VGS sweep (user explicitly chose X=VGS) ---------------
+                % FIX 5: VGS sweep range from LUT, not hardcoded
+                vgs_vec = linspace(min(dev_data.VGS), max(dev_data.VGS), 241);
+                W_ref   = dev_data.W;
                 for k = 1:numel(cust_L)
                     c = colors{mod(k-1,numel(colors))+1};
                     try
                         yd = lookup(dev_data, y_var, 'VGS', vgs_vec, ...
-                                    'L', cust_L(k), 'VDS', cust_vds);
-                        % Normalize per-width if raw current/charge field
-                        W_ref = dev_data.W;   % reference width in struct
-                        if any(strcmp(y_var,{'ID','GM','GMB','GDS', ...
-                                             'CGG','CGS','CSG','CGD', ...
-                                             'CDG','CGB','CDD','CSS'}))
-                            yd = yd / W_ref;  % normalize to per-um
+                                    'L',cust_L(k),'VDS',cust_vds);
+                        if any(strcmp(y_var, norm_fields))
+                            yd = yd / W_ref;
                         end
-                        plot(ax, vgs_vec, yd, 'Color',c, 'LineWidth',2.2, ...
-                             'Tag','data_curve');
+                        yd(isnan(yd) | isinf(yd)) = NaN;  % FIX 3: suppress invalid points
+                        plot(ax, vgs_vec, yd,'Color',c,'LineWidth',2.2,'Tag','data_curve');
                         leg{k} = sprintf('L = %g um', cust_L(k));
                     catch ME
-                        msg1 = sprintf('Cannot plot "%s" at L=%g.', y_var, cust_L(k));
-                        msg2 = 'Check field name. Raw VGS fields:';
-                        msg3 = 'VT ID GM GMB GDS CGG CGS CGD CDG CGB CDD CSS';
-                        errordlg([msg1 char(10) msg2 char(10) msg3],'Plot Error');
+                        errordlg([sprintf('Lookup failed: %s at L=%g.',y_var,cust_L(k)) ...
+                                  char(10) ME.message],'Plot Error');
                         close(nf); return;
                     end
                 end
                 xlabel(ax,'V_{GS}  (V)','Color',CLR.ax_fg,'FontSize',11);
 
             else
-                % ---- GM_ID sweep (derived lookup fields) -------------------
+                % ---- gm/ID sweep (derived fields: GM_GDS, CGG_W, ID_W ...) -
                 gmid = State.gm_id_range;
                 for k = 1:numel(cust_L)
                     c = colors{mod(k-1,numel(colors))+1};
                     try
                         yd = lookup(dev_data, y_var, 'GM_ID', gmid, ...
-                                    'L', cust_L(k), 'VDS', cust_vds);
-                        if strcmp(y_var,'GM_CGG'), yd = yd / (2*pi*1e9); end
-                        plot(ax, gmid, yd, 'Color',c, 'LineWidth',2.2, ...
-                             'Tag','data_curve');
+                                    'L',cust_L(k),'VDS',cust_vds);
+                        if strcmp(y_var,'GM_CGG'), yd = yd/(2*pi*1e9); end
+                        yd(isnan(yd) | isinf(yd)) = NaN;  % FIX 3: suppress invalid points
+                        plot(ax, gmid, yd,'Color',c,'LineWidth',2.2,'Tag','data_curve');
                         leg{k} = sprintf('L = %g um', cust_L(k));
                     catch ME
-                        msg1 = sprintf('Cannot plot "%s" at L=%g.', y_var, cust_L(k));
-                        msg2 = 'Derived gm/ID fields:';
-                        msg3 = 'GM_GDS  GM_CGG  CGG_W  CGD_W  CDD_W  ID_W';
-                        msg4 = 'For raw struct fields use VGS sweep:';
-                        msg5 = 'VT  ID  GM  GMB  GDS  CGG  CGD  CDD  CSS';
-                        errordlg([msg1 char(10) char(10) msg2 char(10) msg3 ...
-                                  char(10) msg4 char(10) msg5],'Plot Error');
+                        errordlg([sprintf('Lookup failed: %s at L=%g.',y_var,cust_L(k)) ...
+                                  char(10) ME.message],'Plot Error');
                         close(nf); return;
                     end
                 end
                 xlabel(ax,'g_m/I_D  (1/V)','Color',CLR.ax_fg,'FontSize',11);
             end
 
-            % Y axis label -- smart units based on field
+            % ---- Y axis label (smart units) ---------------------------------
             ylabels_map = { ...
-                'GM_CGG','f_T (GHz)'; ...
-                'ID_W',  'I_D/W (A/um)'; ...
-                'VT',    'V_T (V)'; ...
-                'ID',    'I_D/W (A/um)'; ...
-                'GM',    'g_m/W (S/um)'; ...
-                'GMB',   'g_mb/W (S/um)'; ...
-                'GDS',   'g_ds/W (S/um)'; ...
-                'CGG',   'C_gg/W (F/um)'; ...
-                'CGD',   'C_gd/W (F/um)'; ...
-                'CDD',   'C_dd/W (F/um)'; ...
-                'CSS',   'C_ss/W (F/um)'; ...
+                'GM_CGG',   'f_T (GHz)'; ...
+                'ID_W',     'I_D/W (A/um)'; ...
+                'VT',       'V_T (V)'; ...
+                'VT_GMID',  'V_T (V)'; ...
+                'VOV_GMID', 'V_OV = VGS-VT (V)'; ...
+                'ID',       'I_D/W (A/um)'; ...
+                'GM',       'g_m/W (S/um)'; ...
+                'GMB',      'g_mb/W (S/um)'; ...
+                'GDS',      'g_ds/W (S/um)'; ...
+                'CGG',      'C_gg/W (F/um)'; ...
+                'CGD',      'C_gd/W (F/um)'; ...
+                'CDD',      'C_dd/W (F/um)'; ...
+                'CSS',      'C_ss/W (F/um)'; ...
             };
-            ylab_idx = strcmp(ylabels_map(:,1), y_var);
-            if any(ylab_idx)
-                ylabel(ax, ylabels_map{ylab_idx,2}, ...
+            yidx = strcmp(ylabels_map(:,1), y_var);
+            if any(yidx)
+                ylabel(ax, ylabels_map{yidx,2}, ...
                     'Interpreter','none','Color',CLR.ax_fg,'FontSize',11);
             else
                 ylabel(ax, y_var,'Interpreter','none','Color',CLR.ax_fg,'FontSize',11);
@@ -359,25 +396,34 @@ function cadence_shortcuts(fig, event)
                 set(ax,'YScale','log');
             end
 
-            x_desc = 'gm/ID'; if use_vgs, x_desc = 'VGS'; end
-            title(ax, sprintf('%s vs %s  (VDS=%.2fV) [%s]', ...
-                y_var, x_desc, cust_vds, upper(State.current_dev)), ...
+            x_lbl = 'gm/ID'; if use_vgs, x_lbl = 'VGS'; end
+            title(ax, sprintf('%s  vs  %s     VDS=%.2fV  [%s]', ...
+                y_var, x_lbl, cust_vds, upper(State.current_dev)), ...
                 'Interpreter','none','Color',CLR.ax_fg,'FontSize',12,'FontWeight','bold');
-            lg = legend(ax, leg, 'Location','best');
+            lg = legend(ax, leg,'Location','best');
             set(lg,'TextColor',CLR.ax_fg,'Color',CLR.panel,'EdgeColor',CLR.grid,'FontSize',10);
 
         % ================================================================
         case 's'   % Auto-sizing
             ans_ = inputdlg({'Target g_m (uS):'}, ...
-                'Auto-Sizing  (fixed L array)',[1 40],{'1000'});
+                'Auto-Sizing  (fixed L array)',[1 40],{''});
             if isempty(ans_), return; end
-            tgt_gm   = str2double(ans_{1})*1e-6;
+            tgt_gm = str2double(ans_{1})*1e-6;
+            if isnan(tgt_gm) || tgt_gm <= 0
+                errordlg('Please enter a valid target gm in uS (e.g. 500).','Input Error');
+                return;
+            end
             tgt_gmid = x_val;
             ID_req   = tgt_gm/tgt_gmid;
 
             rows = {};
             for k=1:numel(State.L_array)
                 idw  = lookup(dev_data,'ID_W', 'GM_ID',tgt_gmid,'L',State.L_array(k),'VDS',State.VDS_target);
+                % FIX 6: guard against near-zero current density
+                if abs(idw) < 1e-15
+                    errordlg(sprintf('ID_W ~ 0 at gm/ID=%.1f L=%.3f: invalid operating point.',tgt_gmid,State.L_array(k)),'Division Error');
+                    close(show_text_window); return;
+                end
                 W    = ID_req/idw;
                 vgs  = lookupVGS(dev_data,'GM_ID',tgt_gmid,'L',State.L_array(k),'VDS',State.VDS_target);
                 cggw = lookup(dev_data,'CGG_W','GM_ID',tgt_gmid,'L',State.L_array(k),'VDS',State.VDS_target);
@@ -420,6 +466,11 @@ function cadence_shortcuts(fig, event)
                 [gu,si] = unique(gain_L);  Lu = dense_L(si);
                 req_L   = interp1(gu,Lu,req_gain,'linear');
                 idw     = lookup(dev_data,'ID_W', 'GM_ID',req_gmid,'L',req_L,'VDS',req_vds);
+                % FIX 6: guard against near-zero current density
+                if abs(idw) < 1e-15
+                    errordlg('ID_W ~ 0: operating point outside valid LUT region.','Division Error');
+                    return;
+                end
                 req_W   = req_id/idw;
                 req_vgs = lookupVGS(dev_data,'GM_ID',req_gmid,'L',req_L,'VDS',req_vds);
                 req_gm  = req_gmid*req_id;
@@ -444,17 +495,44 @@ function cadence_shortcuts(fig, event)
                 {'gm/ID (1/V):','Target I_D (uA):', ...
                  'Length L (um):','V_DS (V):','V_SB (V):'}, ...
                 'Transistor Profiler',[1 46], ...
-                {num2str(round(x_val,1)),'50','0.5', ...
-                 num2str(State.VDS_target),'0'});
+                {'','','','',''});
             if isempty(ans_), return; end
             req_gmid = str2double(ans_{1});
             req_id   = str2double(ans_{2})*1e-6;
             req_L    = str2double(ans_{3});
             req_vds  = str2double(ans_{4});
+            % Validate -- all fields must be filled
+            if any(isnan([req_gmid, req_id*1e6, req_L, req_vds]))
+                errordlg('All fields are required. Please fill in all values.','Input Error');
+                return;
+            end
+            if req_gmid <= 0 || req_id <= 0 || req_L <= 0 || req_vds <= 0
+                errordlg('gm/ID, I_D, L, and V_DS must all be positive values.','Input Error');
+                return;
+            end
             req_vsb  = str2double(ans_{5});
+
+            % FIX 2: LUT boundary validation -- prevent silent extrapolation
+            L_min = min(dev_data.L); L_max = max(dev_data.L);
+            V_min = min(dev_data.VDS); V_max = max(dev_data.VDS);
+            if req_L < L_min || req_L > L_max
+                errordlg(sprintf('L=%.4f um is outside LUT range [%.4f, %.4f] um.', ...
+                    req_L, L_min, L_max),'LUT Boundary Error');
+                return;
+            end
+            if req_vds < V_min || req_vds > V_max
+                errordlg(sprintf('VDS=%.3f V is outside LUT range [%.3f, %.3f] V.', ...
+                    req_vds, V_min, V_max),'LUT Boundary Error');
+                return;
+            end
 
             try
                 id_w    = lookup(dev_data,'ID_W',  'GM_ID',req_gmid,'L',req_L,'VDS',req_vds,'VSB',req_vsb);
+                % FIX 6: guard against near-zero current density
+                if abs(id_w) < 1e-15
+                    errordlg(sprintf('ID_W ~ 0 at gm/ID=%.1f L=%.3f VDS=%.2f: invalid operating point.',req_gmid,req_L,req_vds),'Division Error');
+                    return;
+                end
                 req_W   = req_id / id_w;
                 req_vgs = lookupVGS(dev_data,'GM_ID',req_gmid,'L',req_L,'VDS',req_vds,'VSB',req_vsb);
 
@@ -478,7 +556,21 @@ function cadence_shortcuts(fig, event)
                 req_cgg   = abs(cgg_w)*req_W;
                 req_cgd   = abs(cgd_w)*req_W;
                 req_cdd   = abs(cdd_w)*req_W;
-                req_fT    = req_gm/(2*pi*req_cgg);
+
+                % FIX 3: NaN/Inf guard on all scalar lookup results
+                lut_vals  = [id_w, req_vgs, req_vth, req_gm, gain, req_cgg, req_cgd, req_cdd];
+                if any(isnan(lut_vals) | isinf(lut_vals))
+                    errordlg(sprintf(['One or more LUT lookups returned NaN/Inf at\n' ...
+                        'gm/ID=%.1f  L=%.3f um  VDS=%.2f V.\n' ...
+                        'Operating point may be outside the valid LUT region.'], ...
+                        req_gmid, req_L, req_vds),'Invalid Operating Point');
+                    return;
+                end
+
+                % FIX 1: fT from GM_CGG LUT ratio -- same definition as main plots
+                % req_fT = gm/Cgg / 2pi  using the single precomputed LUT ratio
+                gm_cgg_op = lookup(dev_data,'GM_CGG','GM_ID',req_gmid,'L',req_L,'VDS',req_vds,'VSB',req_vsb);
+                req_fT    = gm_cgg_op / (2*pi);
                 req_vov   = req_vgs - req_vth;
 
                 % Curves across gm/ID for mini-plots
@@ -902,121 +994,235 @@ end
 % =========================================================================
 %  HELPER -- Custom Plot dialog  (clean UI, no confusing hint rows)
 % =========================================================================
-function [y_var, cust_L, cust_vds, ok] = custom_plot_dialog(CLR)
-    ok = false; y_var = ''; cust_L = []; cust_vds = 0.6;
+function [y_var, x_axis, cust_L, cust_vds, ok] = custom_plot_dialog(CLR)
+% Simple two-choice dialog: select Y axis field + X axis, enter L and VDS.
+    ok = false; y_var = 'GM_GDS'; x_axis = 'GMID'; cust_L = []; cust_vds = 0.6;
 
-    % --- Build dialog figure -------------------------------------------
+    fn      = 'Courier New';
+    bg      = [0.08 0.11 0.17];
+    acc     = [0.27 0.73 1.00];
+    grn     = [0.40 0.90 0.50];
+    yel     = [0.95 0.95 0.55];
+    fg      = [0.88 0.90 0.94];
+    btn_off = [0.11 0.15 0.22];   % unselected button bg
+    y_sel   = [0.08 0.28 0.50];   % selected Y button bg (blue)
+    x_gmid_sel = [0.08 0.28 0.50]; % selected gm/ID bg
+    x_vgs_sel  = [0.05 0.28 0.12]; % selected VGS bg
+
+    % ---- All available parameters in one flat list ----------------------
+    all_params = {'GM_GDS','GM_CGG','CGG_W','CGD_W','CDD_W','ID_W', ...
+                  'VT','ID','GM','GMB','GDS','CGG','CGD','CDD','CSS', ...
+                  'VT_GMID','VOV_GMID'};
+    n_params   = numel(all_params);
+
+    % ---- Figure ---------------------------------------------------------
     d = figure('Name','Custom Plot', ...
-               'Color',CLR.panel, ...
-               'Position',[300 250 500 420], ...
-               'NumberTitle','off', ...
-               'MenuBar','none','ToolBar','none', ...
+               'Color',bg, ...
+               'Position',[260 160 520 520], ...
+               'NumberTitle','off','MenuBar','none','ToolBar','none', ...
                'Resize','off');
 
-    bg  = CLR.panel;
-    fg  = CLR.ax_fg;
-    acc = [0.27 0.73 1.00];
-    fn  = 'Courier New';
-
-    % Title bar
-    uicontrol(d,'Style','text','Units','normalized','Position',[0 0.88 1 0.10], ...
+    % ---- Title bar ------------------------------------------------------
+    uicontrol(d,'Style','text','Units','normalized','Position',[0 0.93 1 0.07], ...
         'String','Custom Variable Plot', ...
         'FontName',fn,'FontSize',13,'FontWeight','bold', ...
         'BackgroundColor',[0.10 0.18 0.28],'ForegroundColor',acc);
 
-    % ---- Field reference table (read-only info box) -------------------
-    uicontrol(d,'Style','text','Units','normalized','Position',[0.03 0.48 0.94 0.38], ...
-        'String',{ ...
-            '  gm/ID sweep  (x-axis = gm/ID, auto-selected):', ...
-            '    GM_GDS   GM_CGG   CGG_W   CGD_W   CDD_W   ID_W', ...
-            ' ', ...
-            '  VGS sweep  (x-axis = VGS, auto-selected):', ...
-            '    VT   ID   GM   GMB   GDS   CGG   CGD   CDD   CSS', ...
-            ' ', ...
-            '  Just type the name -- the sweep axis is automatic.'}, ...
-        'FontName',fn,'FontSize',10, ...
-        'HorizontalAlignment','left', ...
-        'BackgroundColor',[0.08 0.12 0.18], ...
-        'ForegroundColor',[0.75 0.88 0.75]);
-
-    % ---- Input fields --------------------------------------------------
-    % Y variable
-    uicontrol(d,'Style','text','Units','normalized','Position',[0.03 0.375 0.35 0.06], ...
-        'String','Y Variable:', ...
-        'FontName',fn,'FontSize',11,'FontWeight','bold', ...
-        'BackgroundColor',bg,'ForegroundColor',fg, ...
+    % =====================================================================
+    % LEFT COLUMN: Y-axis label + parameter buttons
+    % =====================================================================
+    uicontrol(d,'Style','text','Units','normalized','Position',[0.03 0.87 0.55 0.05], ...
+        'String','Y  axis  parameter', ...
+        'FontName',fn,'FontSize',10,'FontWeight','bold', ...
+        'BackgroundColor',[0.10 0.17 0.25],'ForegroundColor',acc, ...
         'HorizontalAlignment','left');
-    h_yvar = uicontrol(d,'Style','edit','Units','normalized','Position',[0.38 0.375 0.59 0.07], ...
+
+    % Build a 3-column grid of Y buttons
+    % 17 params -> 6 rows x 3 cols (last cell empty)
+    cols   = 3;
+    bw     = 0.165;
+    bh     = 0.068;
+    xgap   = 0.012;
+    ygap   = 0.010;
+    x_orig = 0.030;
+    y_orig = 0.800;   % top of first row (normalized, decreasing downward)
+
+    h_ybtn = gobjects(1, n_params);
+    for pi = 1:n_params
+        col = mod(pi-1, cols);
+        row = floor((pi-1) / cols);
+        xp  = x_orig + col*(bw + xgap);
+        yp  = y_orig - row*(bh + ygap);
+        h_ybtn(pi) = uicontrol(d,'Style','pushbutton', ...
+            'Units','normalized','Position',[xp yp bw bh], ...
+            'String', all_params{pi}, ...
+            'FontName',fn,'FontSize',8.5,'FontWeight','bold', ...
+            'BackgroundColor', btn_off, ...
+            'ForegroundColor', fg, ...
+            'UserData', all_params{pi});
+    end
+
+    % Highlight first button (GM_GDS) as default
+    set(h_ybtn(1),'BackgroundColor',y_sel,'ForegroundColor',[1 1 1]);
+
+    function select_y(src, ~)
+        for qi = 1:n_params
+            set(h_ybtn(qi),'BackgroundColor',btn_off,'ForegroundColor',fg);
+        end
+        set(src,'BackgroundColor',y_sel,'ForegroundColor',[1 1 1]);
+        set(h_ydisp,'String', get(src,'UserData'));
+    end
+
+    for pi = 1:n_params
+        set(h_ybtn(pi),'Callback',@select_y);
+    end
+
+    % =====================================================================
+    % RIGHT COLUMN: X-axis toggle + L + VDS
+    % =====================================================================
+    rx = 0.600;   % right column left edge
+
+    uicontrol(d,'Style','text','Units','normalized','Position',[rx 0.87 0.37 0.05], ...
+        'String','X  axis', ...
+        'FontName',fn,'FontSize',10,'FontWeight','bold', ...
+        'BackgroundColor',[0.10 0.17 0.25],'ForegroundColor',acc, ...
+        'HorizontalAlignment','left');
+
+    % gm/ID toggle
+    h_xg = uicontrol(d,'Style','pushbutton','Units','normalized', ...
+        'Position',[rx 0.780 0.170 0.072], ...
+        'String','gm / ID', ...
+        'FontName',fn,'FontSize',11,'FontWeight','bold', ...
+        'BackgroundColor',x_gmid_sel,'ForegroundColor',[1 1 1], ...
+        'UserData','GMID');
+
+    % VGS toggle
+    h_xv = uicontrol(d,'Style','pushbutton','Units','normalized', ...
+        'Position',[rx+0.185 0.780 0.170 0.072], ...
+        'String','VGS', ...
+        'FontName',fn,'FontSize',11,'FontWeight','bold', ...
+        'BackgroundColor',btn_off,'ForegroundColor',grn, ...
+        'UserData','VGS');
+
+    % State holder
+    h_xstate = uicontrol(d,'Style','text','Units','normalized', ...
+        'Position',[rx 0.718 0.360 0.048], ...
+        'String','X = gm / ID', ...
+        'FontName',fn,'FontSize',10, ...
+        'BackgroundColor',bg,'ForegroundColor',acc, ...
+        'UserData','GMID');
+
+    function toggle_x(src, ~)
+        val = get(src,'UserData');
+        set(h_xstate,'UserData',val);
+        if strcmp(val,'GMID')
+            set(h_xg,'BackgroundColor',x_gmid_sel,'ForegroundColor',[1 1 1]);
+            set(h_xv,'BackgroundColor',btn_off,    'ForegroundColor',grn);
+            set(h_xstate,'String','X = gm / ID');
+        else
+            set(h_xv,'BackgroundColor',x_vgs_sel,'ForegroundColor',[1 1 1]);
+            set(h_xg,'BackgroundColor',btn_off,   'ForegroundColor',acc);
+            set(h_xstate,'String','X = VGS');
+        end
+    end
+
+    set(h_xg,'Callback',@toggle_x);
+    set(h_xv,'Callback',@toggle_x);
+
+    % ---- Divider --------------------------------------------------------
+    annotation(d,'line',[rx-0.01 0.97],[0.700 0.700], ...
+        'Color',[0.22 0.30 0.40],'LineWidth',0.8);
+
+    % ---- L input --------------------------------------------------------
+    uicontrol(d,'Style','text','Units','normalized','Position',[rx 0.645 0.360 0.045], ...
+        'String','L  (um)', ...
+        'FontName',fn,'FontSize',10,'FontWeight','bold', ...
+        'BackgroundColor',bg,'ForegroundColor',fg,'HorizontalAlignment','left');
+    h_L = uicontrol(d,'Style','edit','Units','normalized', ...
+        'Position',[rx 0.580 0.360 0.058], ...
+        'String','0.5', ...
+        'FontName',fn,'FontSize',12, ...
+        'BackgroundColor',[0.05 0.08 0.13],'ForegroundColor',yel);
+
+    % ---- VDS input ------------------------------------------------------
+    uicontrol(d,'Style','text','Units','normalized','Position',[rx 0.510 0.360 0.045], ...
+        'String','VDS  (V)', ...
+        'FontName',fn,'FontSize',10,'FontWeight','bold', ...
+        'BackgroundColor',bg,'ForegroundColor',fg,'HorizontalAlignment','left');
+    h_vds = uicontrol(d,'Style','edit','Units','normalized', ...
+        'Position',[rx 0.445 0.360 0.058], ...
+        'String','0.6', ...
+        'FontName',fn,'FontSize',12, ...
+        'BackgroundColor',[0.05 0.08 0.13],'ForegroundColor',yel);
+
+    % =====================================================================
+    % BOTTOM: Y display + Plot / Cancel
+    % =====================================================================
+    annotation(d,'line',[0.03 0.97],[0.175 0.175], ...
+        'Color',[0.22 0.30 0.40],'LineWidth',0.8);
+
+    uicontrol(d,'Style','text','Units','normalized','Position',[0.03 0.115 0.18 0.050], ...
+        'String','Y:', ...
+        'FontName',fn,'FontSize',11,'FontWeight','bold', ...
+        'BackgroundColor',bg,'ForegroundColor',fg,'HorizontalAlignment','left');
+    h_ydisp = uicontrol(d,'Style','edit','Units','normalized', ...
+        'Position',[0.14 0.112 0.26 0.058], ...
         'String','GM_GDS', ...
         'FontName',fn,'FontSize',11,'FontWeight','bold', ...
-        'BackgroundColor',[0.06 0.09 0.14], ...
-        'ForegroundColor',[0.95 0.95 0.55]);
+        'BackgroundColor',[0.05 0.08 0.13],'ForegroundColor',yel);
 
-    % Length(s)
-    uicontrol(d,'Style','text','Units','normalized','Position',[0.03 0.280 0.35 0.06], ...
-        'String','L (um):', ...
-        'FontName',fn,'FontSize',11,'FontWeight','bold', ...
-        'BackgroundColor',bg,'ForegroundColor',fg, ...
-        'HorizontalAlignment','left');
-    h_L = uicontrol(d,'Style','edit','Units','normalized','Position',[0.38 0.280 0.59 0.07], ...
-        'String','0.5', ...
-        'FontName',fn,'FontSize',11, ...
-        'BackgroundColor',[0.06 0.09 0.14], ...
-        'ForegroundColor',[0.95 0.95 0.55]);
-
-    % VDS
-    uicontrol(d,'Style','text','Units','normalized','Position',[0.03 0.185 0.35 0.06], ...
-        'String','V_DS (V):', ...
-        'FontName',fn,'FontSize',11,'FontWeight','bold', ...
-        'BackgroundColor',bg,'ForegroundColor',fg, ...
-        'HorizontalAlignment','left');
-    h_vds = uicontrol(d,'Style','edit','Units','normalized','Position',[0.38 0.185 0.59 0.07], ...
-        'String','0.6', ...
-        'FontName',fn,'FontSize',11, ...
-        'BackgroundColor',[0.06 0.09 0.14], ...
-        'ForegroundColor',[0.95 0.95 0.55]);
-
-    % ---- Buttons -------------------------------------------------------
-    uicontrol(d,'Style','pushbutton','Units','normalized','Position',[0.20 0.04 0.28 0.10], ...
+    uicontrol(d,'Style','pushbutton','Units','normalized', ...
+        'Position',[0.44 0.100 0.25 0.075], ...
         'String','Plot', ...
-        'FontName',fn,'FontSize',12,'FontWeight','bold', ...
-        'BackgroundColor',[0.10 0.35 0.55], ...
-        'ForegroundColor',[1 1 1], ...
+        'FontName',fn,'FontSize',13,'FontWeight','bold', ...
+        'BackgroundColor',[0.10 0.35 0.55],'ForegroundColor',[1 1 1], ...
         'Callback',@do_ok);
-    uicontrol(d,'Style','pushbutton','Units','normalized','Position',[0.55 0.04 0.25 0.10], ...
+    uicontrol(d,'Style','pushbutton','Units','normalized', ...
+        'Position',[0.72 0.100 0.23 0.075], ...
         'String','Cancel', ...
         'FontName',fn,'FontSize',12, ...
-        'BackgroundColor',[0.25 0.10 0.10], ...
-        'ForegroundColor',[1 1 1], ...
+        'BackgroundColor',[0.30 0.10 0.10],'ForegroundColor',[1 1 1], ...
         'Callback',@(~,~) delete(d));
 
-    % Store output variables accessible across callbacks
-    res.y_var    = '';
+    % =====================================================================
+    % State + callbacks
+    % =====================================================================
+    res.y_var    = 'GM_GDS';
+    res.x_axis   = 'GMID';
     res.cust_L   = [];
     res.cust_vds = 0.6;
     res.ok       = false;
     setappdata(d,'res',res);
 
-    % OK callback
     function do_ok(~,~)
-        r.y_var    = upper(strtrim(get(h_yvar,'String')));
-        r.cust_L   = str2num(get(h_L,'String')); %#ok<ST2NM>
+        r.y_var    = upper(strtrim(get(h_ydisp,'String')));
+        r.x_axis   = get(h_xstate,'UserData');
+        % FIX 4: str2double is safe (no eval); support range via str2num only for ':' syntax
+        raw_L = strtrim(get(h_L,'String'));
+        if contains(raw_L,':') || contains(raw_L,'linspace')
+            r.cust_L = str2num(raw_L); %#ok<ST2NM>  % range syntax needs eval
+        else
+            r.cust_L = str2double(raw_L);  % safe path for single value
+            if isnan(r.cust_L), r.cust_L = []; end
+        end
         r.cust_vds = str2double(get(h_vds,'String'));
+        if isempty(r.y_var)
+            errordlg('Select a Y parameter.','Input Error'); return;
+        end
         if isempty(r.cust_L)
-            errordlg('Invalid length. Use e.g.  0.5  or  0.06:0.02:0.12','Input Error');
-            return;
+            errordlg('Enter a valid L.  e.g.  0.5  or  0.06:0.02:0.12','Input Error'); return;
         end
         r.ok = true;
         setappdata(d,'res',r);
         uiresume(d);
     end
 
-    % Block until user clicks Plot or closes
     uiwait(d);
 
     if ishandle(d)
-        res = getappdata(d,'res');
+        res      = getappdata(d,'res');
         y_var    = res.y_var;
+        x_axis   = res.x_axis;
         cust_L   = res.cust_L;
         cust_vds = res.cust_vds;
         ok       = res.ok;
