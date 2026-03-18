@@ -1,6 +1,6 @@
 % =========================================================================
 % Analog IC Design Master Script -- gm/ID Methodology
-% Technology : TSMC 65nm CMOS
+% Technology : 65nm CMOS
 %
 % Author      : Hassan Shehata Ali
 % Institution : Mansoura University
@@ -57,14 +57,14 @@ CLR.accent     = [0.27 0.73 1.00];
 State.nch              = nch;
 State.pch              = pch;
 State.current_dev      = 'nch';
-State.L_array          = [0.5];
+State.L_array          = [0.1:0.1:1];
 State.VDS_target       = 0.6;
 State.gm_id_range      = 5:0.5:30;
 State.last_design_report = 'No design generated yet.';
 State.CLR              = CLR;
 
 %% 4. Launch
-fig = figure('Name','TSMC 65nm  |  gm/ID Design Space', ...
+fig = figure('Name','65nm CMOS  |  gm/ID Design Space', ...
              'Position',[80 120 1280 420], ...
              'Color', CLR.bg);
 setappdata(fig,'State',State);
@@ -87,7 +87,7 @@ function update_main_plots(fig)
     dlabel   = 'NMOS'; if ~isN, dlabel='PMOS'; end
     colors   = CLR.nmos_lines; if ~isN, colors=CLR.pmos_lines; end
 
-    set(fig,'Name',sprintf('TSMC 65nm  |  gm/ID Design Space  [%s]  VDS=%.2fV', dlabel, VDS));
+    set(fig,'Name',sprintf('65nm CMOS  |  gm/ID Design Space  [%s]  VDS=%.2fV', dlabel, VDS));
 
     nL  = numel(L);
     leg = cell(1,nL);
